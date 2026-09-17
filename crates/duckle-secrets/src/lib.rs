@@ -488,6 +488,7 @@ fn resolve_transport_ref(workspace: &Path, props: &mut JsonValue) -> Result<(), 
         ("readTimeoutSecs", "httpReadTimeoutSecs"),
         ("connectTimeoutSecs", "httpConnectTimeoutSecs"),
         ("userAgent", "httpUserAgent"),
+        ("maxRetries", "httpMaxRetries"),
     ] {
         let filled = |v: Option<&JsonValue>| -> bool {
             !matches!(v, None | Some(JsonValue::Null)) && v.and_then(|x| x.as_str()) != Some("")
