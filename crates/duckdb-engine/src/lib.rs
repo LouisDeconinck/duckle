@@ -1948,7 +1948,13 @@ impl DuckdbEngine {
                     }
                 }
             }
-            let sql = format!("{}{}{}", secret_prefix, memory_pragma, stage_sql);
+            let sql = format!(
+                "{}{}{}{}",
+                secret_prefix,
+                memory_pragma,
+                stage.pre_sql.as_deref().unwrap_or(""),
+                stage_sql
+            );
             // Retry loop: retry_attempts >= 1; with the default of 1 we
             // call run() exactly once. Retries sleep retry_backoff_ms
             // (linearly scaled by attempt index) between attempts.
@@ -3161,6 +3167,15 @@ impl DuckdbEngine {
         for (i, stage) in stages.iter().enumerate() {
             if group_span.map(|(first, _)| i == first).unwrap_or(false) {
                 batched_sql.push_str("BEGIN TRANSACTION;\n");
+            }
+            // A stage's pre-statement (e.g. the #118 Explode type guard)
+            // runs ahead of its CREATE, inside the same session.
+            if let Some(pre) = &stage.pre_sql {
+                batched_sql.push_str(pre);
+                if !pre.trim_end().ends_with(';') {
+                    batched_sql.push(';');
+                }
+                batched_sql.push('\n');
             }
             batched_sql.push_str(&stage.sql);
             // Planner does not always terminate stage.sql with ';' -
@@ -7427,6 +7442,7 @@ mod tests {
             component_id: component_id.into(),
             label: node_id.into(),
             sql: String::new(),
+            pre_sql: None,
             kind,
             from: None,
             publish_group: None,
