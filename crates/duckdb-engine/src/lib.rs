@@ -7176,6 +7176,20 @@ pub fn compile_pipeline_sql_opts(
             } else {
                 redact_secret_values(&s.sql, &secrets)
             };
+            // A stage's pre-statement runs ahead of its CREATE inside the
+            // same session (see the executor); the export shows it too, or a
+            // copied-out script omits a statement the run executes - and the
+            // guard's error, which names the column and the component, is the
+            // better failure a pasted script can produce.
+            let sql = match &s.pre_sql {
+                Some(pre) => format!(
+                    "{}{}\n{}",
+                    pre,
+                    if pre.trim_end().ends_with(';') { "" } else { ";" },
+                    sql
+                ),
+                None => sql,
+            };
             let sql = match group_span {
                 Some((first, last)) if i == first && i == last => {
                     format!("BEGIN TRANSACTION;\n{}\nCOMMIT; DETACH duckle_dst;", sql)

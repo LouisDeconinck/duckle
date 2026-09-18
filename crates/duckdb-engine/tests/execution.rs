@@ -2056,6 +2056,38 @@ fn export_includes_control_flow_steps() {
 }
 
 #[test]
+fn export_includes_a_stage_pre_statement() {
+    // #118: the Explode type guard travels in `pre_sql` so stage.sql stays
+    // CREATE-first for node analysis - but that also kept it out of the
+    // export, so a copied-out script was missing a statement the run
+    // executes and failed with a bare length(STRUCT) error instead of the
+    // guard's named column. (Pure compilation - no engine needed.)
+    use duckle_duckdb_engine::compile_pipeline_sql_opts;
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "items\nx\n");
+    let d = doc(
+        json!([
+            node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+            node("x", "xf.arr.explode", json!({ "column": "items" })),
+            node("k", "snk.csv", json!({ "path": out_path(tmp.path(), "out.csv"), "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "x"), main_edge("e2", "x", "k")]),
+    );
+    let stages = compile_pipeline_sql_opts(&d, false).expect("compile");
+    let stage = stages.iter().find(|s| s.node_id == "x").expect("explode stage");
+    assert!(
+        stage.sql.contains("column_name = 'items'"),
+        "the export carries the guard the executor prepends: {}",
+        stage.sql
+    );
+    assert!(
+        stage.sql.contains("CREATE OR REPLACE"),
+        "and the stage body still follows it: {}",
+        stage.sql
+    );
+}
+
+#[test]
 fn compiled_sql_maps_username_to_attach_user() {
     // The UI writes DB login names as `username`, while DuckDB's
     // Postgres/MySQL connection string expects `user=...`.

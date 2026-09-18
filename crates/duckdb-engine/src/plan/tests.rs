@@ -2572,7 +2572,7 @@
     /// binder types every CASE branch, so nothing inside the SELECT can
     /// survive a non-list column.
     #[test]
-    fn explode_prepends_a_type_guard_that_names_the_column() {
+    fn explode_carries_a_type_guard_that_names_the_column() {
         use crate::plan::builders::list_column_guard;
         let mut ni = NodeInputs::default();
         ni.ports.insert("main".into(), vec!["up".into()]);
