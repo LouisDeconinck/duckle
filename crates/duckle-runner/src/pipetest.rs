@@ -954,6 +954,28 @@ pub fn run(duckdb: PathBuf) -> ExitCode {
         }
         paths.push(PathBuf::from(arg));
     }
+    // Argument guards before suite discovery, so a refused flag is reported
+    // as itself even from a directory with no tests/ under it.
+    if affected_base.is_none() && !affected_head.trim().is_empty() {
+        eprintln!("duckle-runner test: --head only makes sense with --affected --base <rev>");
+        return ExitCode::from(2);
+    }
+    if let Some(base) = &affected_base {
+        if base.trim().is_empty() {
+            eprintln!("duckle-runner test --affected: --base <rev> is required");
+            return ExitCode::from(2);
+        }
+        // A committed --head has no files on disk to point at: select returns
+        // an empty path map for it, so the only outcomes would be "could not
+        // be located" or "nothing affected". Refuse it up front rather than
+        // letting a gate read either as an answer.
+        if !affected_head.trim().is_empty() {
+            eprintln!(
+                "duckle-runner test --affected: --head names a committed revision, which has no files to run suites against. Check it out and pass --base only."
+            );
+            return ExitCode::from(2);
+        }
+    }
     // Nothing named: every suite under ./tests, which is where a workspace keeps them.
     if paths.is_empty() {
         if let Ok(entries) = std::fs::read_dir("tests") {
@@ -971,25 +993,10 @@ pub fn run(duckdb: PathBuf) -> ExitCode {
         }
     }
 
-    if affected_base.is_none() && !affected_head.trim().is_empty() {
-        eprintln!("duckle-runner test: --head only makes sense with --affected --base <rev>");
-        return ExitCode::from(2);
-    }
+    // Selection chatter goes to stderr: under --format the only thing on
+    // stdout is the report, the way the ok/FAIL lines are kept off it.
+    let quiet = json_out || !format.is_empty();
     if let Some(base) = affected_base {
-        if base.trim().is_empty() {
-            eprintln!("duckle-runner test --affected: --base <rev> is required");
-            return ExitCode::from(2);
-        }
-        // A committed --head has no files on disk to point at: select returns
-        // an empty path map for it, so the only outcomes would be "could not
-        // be located" or "nothing affected". Refuse it up front rather than
-        // letting a gate read either as an answer.
-        if !affected_head.trim().is_empty() {
-            eprintln!(
-                "duckle-runner test --affected: --head names a committed revision, which has no files to run suites against. Check it out and pass --base only."
-            );
-            return ExitCode::from(2);
-        }
         let affected = match crate::affected_cmd::select(
             &affected_workspace,
             &base,
@@ -1023,10 +1030,9 @@ pub fn run(duckdb: PathBuf) -> ExitCode {
             .iter()
             .filter_map(|rel| std::fs::canonicalize(affected_workspace.join(rel)).ok())
             .collect();
-        // A selection against a committed --head has no files to point at -
-        // every pipeline resolves to nothing. Refusing rather than running
-        // nothing is what validate --affected does, and a gate that reports a
-        // clean run while selecting nothing is worse than failing loudly.
+        // Belt and braces: with --head refused above every selected id has a
+        // located path, so this block is unreachable - kept for the day the
+        // guard moves.
         let unlocated: Vec<&str> = affected
             .selection
             .selected
@@ -1060,14 +1066,21 @@ Refusing rather than reporting a clean run.",
             })
             .collect();
         if !stray.is_empty() {
-            // Files the model does not cover changed: "nothing affected" would
-            // be a guess, not an answer. A test gate fails open on purpose -
-            // the cost is minutes, never a missed run.
-            println!("changed, and not modelled as an input to any pipeline:");
+            // Files the model does not cover changed. Reported either way;
+            // stderr, so a machine format stays the only thing on stdout.
+            eprintln!("changed, and not modelled as an input to any pipeline:");
             for f in &stray {
-                println!("  {f}");
+                eprintln!("  {f}");
             }
-            println!("running every suite - the selection cannot say these change nothing");
+        }
+        if !stray.is_empty() && selected.is_empty() {
+            // Only when the selection produced nothing does an unmodelled
+            // change make "nothing affected" a guess rather than an answer,
+            // and only then does the gate fail open - the cost is minutes,
+            // never a missed run. When pipelines WERE selected the normal
+            // retain applies: an unmodelled README beside a real change must
+            // not switch the feature off for ordinary pull requests.
+            eprintln!("running every suite - the selection cannot say these change nothing");
         } else {
             let mut skipped = Vec::new();
             paths.retain(|path| {
@@ -1099,11 +1112,15 @@ Refusing rather than reporting a clean run.",
                     None => true,
                 }
             });
-            for s in &skipped {
-                println!("skip  {s}  (pipeline not affected)");
+            if !quiet {
+                for s in &skipped {
+                    println!("skip  {s}  (pipeline not affected)");
+                }
             }
             if paths.is_empty() {
-                println!("nothing affected against {base}");
+                if !quiet {
+                    println!("nothing affected against {base}");
+                }
                 return ExitCode::from(0);
             }
         }

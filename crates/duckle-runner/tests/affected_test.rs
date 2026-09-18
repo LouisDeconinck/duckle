@@ -205,14 +205,36 @@ fn test_affected_runs_a_changed_suite_and_fails_open_on_unmodelled_changes() {
     std::fs::write(ws.join("notes.txt"), "unmodelled\n").unwrap();
     let out = run();
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains("not modelled"),
-        "the unclassified files are printed: {stdout}"
+        stderr.contains("not modelled"),
+        "the unclassified files are reported: {stderr}"
     );
     assert!(
         !stdout.contains("nothing affected"),
         "an unmodelled change is not 'nothing affected': {stdout}"
     );
+
+    // But an unmodelled change NEXT TO a selected pipeline does not fail
+    // open: the selection produced an answer, so the normal retain applies
+    // and only the affected suite runs. Failing open here would switch the
+    // feature off for the ordinary pull request that touches a doc file.
+    git(ws, &["add", "-A"]);
+    git(ws, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "unmodelled"]);
+    let a = ws.join("pipelines/a.pipeline.json");
+    let text = std::fs::read_to_string(&a).unwrap().replace("id > 0", "id >= 0");
+    std::fs::write(&a, text).unwrap();
+    std::fs::write(ws.join("README.md"), "docs\n").unwrap();
+    let out = run();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "a ran: {stdout} {stderr}");
+    assert!(stdout.contains("ok    "), "the affected suite ran: {stdout}");
+    assert!(
+        stdout.contains("b.test.json"),
+        "b is still skipped when the selection produced an answer: {stdout}"
+    );
+    assert!(stderr.contains("README.md"), "the unmodelled file is still reported: {stderr}");
 }
 
 /// A relative --workspace used to double-join the path prefix and drop every
@@ -242,10 +264,13 @@ fn test_affected_accepts_a_relative_workspace() {
     std::fs::write(&a, text).unwrap();
 
     // Run from the PARENT with a relative --workspace, the shape that
-    // double-joined the prefix.
+    // double-joined the prefix. The suite is named explicitly: discovered
+    // suites are read from ./tests relative to the working directory, and
+    // asserting only that "nothing affected" is absent would pass on the
+    // usage error the empty discovery exits with - leaving the fix unpinned.
     let out = Command::new(env!("CARGO_BIN_EXE_duckle-runner"))
         .arg("test")
-        .args(["--affected", "--base", "HEAD", "--workspace", "ws"])
+        .args(["ws/tests/a.test.json", "--affected", "--base", "HEAD", "--workspace", "ws"])
         .current_dir(tmp.path())
         .env("DUCKLE_DUCKDB_BIN", &bin)
         .env("DUCKLE_WORKSPACE", &ws)
@@ -253,8 +278,13 @@ fn test_affected_accepts_a_relative_workspace() {
         .expect("the runner starts");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !stdout.contains("nothing affected"),
-        "a changed pipeline under a relative workspace is found: {stdout}"
+        out.status.success(),
+        "a changed pipeline under a relative workspace runs its suite: {stdout} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("ok    passes"),
+        "the suite actually ran: {stdout}"
     );
 }
 
