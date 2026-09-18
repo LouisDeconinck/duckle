@@ -776,9 +776,10 @@ down costs one short timeout and the events are already durable. Each run then
 drains a slice of the backlog (at most 100 events, so a long outage cannot
 hold a finished run open); `duckle-runner openlineage flush` drains it all on
 demand, which is the right thing to put on a timer after an outage. An event
-the collector rejects outright (4xx) is quarantined to
+the collector rejects outright (400, 413, 422) is quarantined to
 `logs/openlineage.rejected.ndjson` rather than replayed forever, and the
-buffer is capped at 10,000 events, oldest dropped first. Catalog asset
+buffer is capped at 10,000 events enforced on every emit, with the oldest
+shed to `logs/openlineage.dropped.ndjson` rather than deleted. Catalog asset
 ids are credential-free by construction; query strings are stripped on top of
 that, so a signed URL never carries its signature off the machine.
 `hashDatasetNames` replaces names with a digest and keeps the namespace, for an
