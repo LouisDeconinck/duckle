@@ -194,6 +194,7 @@ jobs:
               mkdir -p "$ws/data"
               sed "s|\${workspace}|$PWD/${ws%/}|g" "$ws/gen_samples.sql" | "$DUCKLE_DUCKDB_BIN" :memory:
             fi
+            [ -d "$ws/pipelines" ] || continue
             for p in "$ws"pipelines/*.pipeline.json; do
               case "$(basename "$p")" in _*) continue ;; esac
               echo "== $p"
