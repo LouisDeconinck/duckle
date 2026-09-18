@@ -15858,6 +15858,9 @@ fn a_cursor_does_not_advance_past_a_parent_that_failed() {
                     "onParentError": "skip",
                     "incrementalField": "updated_at",
                     "incrementalInitial": "1970-01-01",
+                    // One request per parent: the retry default would re-ask
+                    // the 500 and break the request-count arithmetic below.
+                    "httpMaxRetries": 0,
                 })),
                 node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
             ]),
@@ -16600,6 +16603,9 @@ fn a_pagination_walk_cut_short_by_a_failure_is_incomplete() {
                 "nextPageSelector": "a.next",
                 "onError": "skip",
                 "maxPages": 10,
+                // One request per page: the retry default would re-ask the
+                // failed page and break the served-count arithmetic.
+                "httpMaxRetries": 0,
             })),
             node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
         ]),

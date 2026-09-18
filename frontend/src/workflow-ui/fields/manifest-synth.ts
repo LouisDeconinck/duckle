@@ -594,7 +594,7 @@ const httpTransportFields = (): Field[] => [
         kind: 'integer',
         placeholder: '3',
         description:
-            'Times a 429 or 5xx response is retried before the stage fails. Retry-After is honoured when the server sends it; 0 disables retrying.',
+            'Times a 429 or 5xx response is retried before the stage fails. Retry-After is honoured when the server sends it; 0 disables retrying. Methods that are not idempotent (POST and friends) are only retried when this is set explicitly - setting it opts them in.',
     },
 ];
 
