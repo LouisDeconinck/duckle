@@ -583,14 +583,17 @@ pub fn flush(workspace: &Path, cfg: &Config) -> FlushOutcome {
 
 fn flush_bounded(workspace: &Path, cfg: &Config, cap: usize) -> FlushOutcome {
     let mut outcome = FlushOutcome::default();
+    let path = workspace.join("logs").join("openlineage.ndjson");
+    // Recovery is not gated on the collector still being configured: an
+    // interrupted pass leaves the only copy of undelivered events under the
+    // `sending` name, and they belong back in the buffer whatever happens next.
+    adopt_stranded_buffers(&path);
     let Some(endpoint) = cfg.endpoint.as_deref().filter(|e| !e.trim().is_empty()) else {
         return outcome;
     };
     if !export_permitted(workspace) {
         return outcome;
     }
-    let path = workspace.join("logs").join("openlineage.ndjson");
-    adopt_stranded_buffers(&path);
     // A temp name of this writer's own: two flushes in one workspace (serve
     // plus the scheduler, or a flush on a timer) must never share one.
     static SEND_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -663,9 +666,7 @@ fn flush_bounded(workspace: &Path, cfg: &Config, cap: usize) -> FlushOutcome {
     // lose its events, which is the race the move-aside exists to prevent.
     // `sending` is removed only once its contents are safely back - a failed
     // re-append must not delete the only copy of undelivered events.
-    if kept.is_empty() {
-        let _ = std::fs::remove_file(&sending);
-    } else if crate::ndjson::append_records(&path, &kept.join("\n")).is_ok() {
+    if kept.is_empty() || crate::ndjson::append_records(&path, &kept.join("\n")).is_ok() {
         let _ = std::fs::remove_file(&sending);
     }
     outcome
@@ -1331,5 +1332,98 @@ mod tests {
         assert_eq!(got.lock().unwrap().len(), 1);
         let left = std::fs::read_to_string(ws.join("logs/openlineage.ndjson")).unwrap();
         assert!(left.contains(r#"{"eventType":"STA"#), "the torn line stays buffered: {left}");
+    }
+
+    /// A stub that runs `on_body` after reading each POST, before answering:
+    /// a deterministic way to land an append inside the drain window.
+    fn stub_collector_touching(
+        statuses: Vec<u16>,
+        on_body: impl Fn() + Send + Sync + 'static,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let g = got.clone();
+        let on_body = std::sync::Arc::new(on_body);
+        std::thread::spawn(move || {
+            for status in statuses {
+                let Ok((stream, _)) = listener.accept() else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    if reader.read_line(&mut h).is_err() || h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; len];
+                let _ = reader.read_exact(&mut body);
+                g.lock().unwrap().push(String::from_utf8_lossy(&body).into_owned());
+                on_body();
+                let _ = stream.try_clone().unwrap().write_all(
+                    format!("HTTP/1.1 {status} X\r\nContent-Length: 0\r\n\r\n").as_bytes(),
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}/api/v1/lineage"), got)
+    }
+
+    /// An emit that lands while a drain holds the buffer aside must not be
+    /// lost: it goes to a fresh `openlineage.ndjson`, and the drain touching
+    /// only its moved-aside copy never sees it to delete it.
+    #[test]
+    fn an_append_during_the_drain_survives_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let buffer = ws.join("logs").join("openlineage.ndjson");
+        let b = buffer.clone();
+        let (endpoint, got) = stub_collector_touching(vec![200], move || {
+            // Inside the drain window: the buffer is renamed away and this
+            // append starts the fresh file a concurrent emit would write.
+            crate::ndjson::append_records(&b, r#"{"eventType":"COMPLETE","n":2}"#).unwrap();
+        });
+        let cfg = Config { endpoint: Some(endpoint), ..Config::default() };
+        buffered(ws, &[r#"{"eventType":"START","n":1}"#]);
+
+        let out = flush(ws, &cfg);
+        assert_eq!(out, FlushOutcome { sent: 1, kept: 0, rejected: 0 });
+        assert_eq!(got.lock().unwrap().len(), 1);
+        let left = std::fs::read_to_string(&buffer).unwrap();
+        assert_eq!(left.trim(), r#"{"eventType":"COMPLETE","n":2}"#, "{left}");
+    }
+
+    /// Two drains in one workspace cannot collide: the loser's rename fails on
+    /// the missing buffer and it reports having drained nothing, while the
+    /// winner delivers every line exactly once.
+    #[test]
+    fn two_concurrent_drains_do_not_collide() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (endpoint, got) = stub_collector(vec![200, 200]);
+        let cfg = Config { endpoint: Some(endpoint), ..Config::default() };
+        buffered(ws, &[r#"{"eventType":"START","n":1}"#, r#"{"eventType":"COMPLETE","n":2}"#]);
+
+        let cfg2 = cfg.clone();
+        let ws2 = ws.to_path_buf();
+        let other = std::thread::spawn(move || flush(&ws2, &cfg2));
+        let mine = flush(ws, &cfg);
+        let theirs = other.join().unwrap();
+
+        assert_eq!(mine.sent + theirs.sent, 2, "each event delivered exactly once");
+        assert_eq!(got.lock().unwrap().len(), 2, "no event is POSTed twice");
+        assert_eq!(
+            std::fs::read_to_string(ws.join("logs/openlineage.ndjson")).unwrap_or_default(),
+            "",
+        );
+        assert!(
+            std::fs::read_dir(ws.join("logs"))
+                .unwrap()
+                .all(|e| !e.unwrap().file_name().to_string_lossy().contains("sending")),
+            "the drained-away file is not stranded"
+        );
     }
 }
